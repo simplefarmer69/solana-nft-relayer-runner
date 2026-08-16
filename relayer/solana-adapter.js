@@ -6,6 +6,12 @@
 //     deposits are detected from the escrow's post-token-balance diff,
 //     releases go out via transferChecked from the escrow ATA;
 //
+//   * programmable NFTs (Token Metadata tokenStandard 4/5 — token account is
+//     FROZEN by the TM program, plain transferChecked always fails): deposits
+//     ride the same balance-diff detection, releases route through
+//     mpl-token-metadata transferV1, which thaws/re-freezes via the token
+//     record and carries the ruleset when the metadata pins one;
+//
 //   * Metaplex Core assets (program CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d,
 //     ONE account per asset, no mint/ATA at all — e.g. Collector Crypt vaulted
 //     cards): deposits are detected from a Core TransferV1 instruction whose
@@ -55,6 +61,24 @@ function lazyUmi() {
   return { createUmi, mplCore, transferV1, keypairIdentity, publicKey };
 }
 
+function lazyTmUmi() {
+  // Only needed when a programmable NFT (pNFT) actually moves.
+  const { createUmi } = require("@metaplex-foundation/umi-bundle-defaults");
+  const tm = require("@metaplex-foundation/mpl-token-metadata");
+  const { keypairIdentity, publicKey, unwrapOption } = require("@metaplex-foundation/umi");
+  return {
+    createUmi,
+    mplTokenMetadata: tm.mplTokenMetadata,
+    tmTransferV1: tm.transferV1,
+    TokenStandard: tm.TokenStandard,
+    fetchMetadata: tm.fetchMetadata,
+    findMetadataPda: tm.findMetadataPda,
+    keypairIdentity,
+    publicKey,
+    unwrapOption,
+  };
+}
+
 function hexToBytes(hex) {
   return Buffer.from(hex.replace(/^0x/, ""), "hex");
 }
@@ -89,8 +113,11 @@ function decodeCoreAsset(data, bs58) {
 }
 
 /// Minimal Metaplex Token Metadata decode (key 4 == MetadataV1):
-/// [key u8][updateAuthority 32][mint 32][name][symbol][uri]... — enough to
-/// recover the SPL NFT's metadata URI.
+/// [key u8][updateAuthority 32][mint 32][name][symbol][uri]... plus a
+/// best-effort walk to tokenStandard (Option<u8> after sellerFeeBasisPoints,
+/// creators, primarySaleHappened, isMutable, editionNonce) so releases can
+/// route programmable NFTs (standard 4/5) through TM transferV1 instead of
+/// the plain SPL path, which a pNFT's frozen token account always rejects.
 function decodeTokenMetadata(data) {
   if (!data || data.length < 66 || data[0] !== 4) return null;
   let off = 65;
@@ -99,8 +126,26 @@ function decodeTokenMetadata(data) {
   if (name === null) return null;
   [symbol, off] = borshString(data, off);
   if (symbol === null) return null;
-  [uri] = borshString(data, off);
-  return { name, symbol, uri };
+  [uri, off] = borshString(data, off);
+  let tokenStandard = null;
+  try {
+    if (uri !== null) {
+      off += 2; // sellerFeeBasisPoints u16
+      const hasCreators = data[off];
+      off += 1;
+      if (hasCreators === 1) {
+        const n = data.readUInt32LE(off);
+        off += 4 + n * 34; // Creator = pubkey(32) + verified(1) + share(1)
+      }
+      off += 2; // primarySaleHappened + isMutable
+      const hasEditionNonce = data[off];
+      off += 1 + (hasEditionNonce === 1 ? 1 : 0);
+      if (data[off] === 1) tokenStandard = data[off + 1];
+    }
+  } catch {
+    tokenStandard = null; // best-effort — an undecodable tail means "not a pNFT"
+  }
+  return { name, symbol, uri, tokenStandard };
 }
 
 const TOKEN_METADATA_PROGRAM_ID = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s";
@@ -267,7 +312,7 @@ class SolanaRpcAdapter {
       if (!info) return null;
       const md = decodeTokenMetadata(info.data);
       if (!md) return null;
-      return { uri: md.uri || null, name: md.name || null };
+      return { uri: md.uri || null, name: md.name || null, tokenStandard: md.tokenStandard };
     } catch {
       return null; // metadata is best-effort; never block a deposit on it
     }
@@ -346,6 +391,14 @@ class SolanaRpcAdapter {
       throw new Error(`escrow does not hold mint ${mintHex}`);
     }
 
+    // Programmable NFTs (tokenStandard 4/5) keep their token accounts FROZEN
+    // by the Token Metadata program — plain transferChecked always fails.
+    // Route them through TM transferV1 (handles token records + ruleset).
+    const md = await this._splMetadata(mint.toBase58());
+    if (md && (md.tokenStandard === 4 || md.tokenStandard === 5)) {
+      return this._releasePnft(mint, recipient, bs58);
+    }
+
     const ixs = [];
     const recInfo = await this.connection.getAccountInfo(recipientAta, this.commitment);
     if (!recInfo) {
@@ -375,6 +428,53 @@ class SolanaRpcAdapter {
       { commitment: this.commitment }
     );
     return { sigHex: "0x" + Buffer.from(bs58.decode(sig)).toString("hex"), alreadyReleased: false };
+  }
+
+  /// Programmable NFT release: escrow signs as token owner; TM transferV1
+  /// thaws the frozen escrow token account via its token record, moves the
+  /// token, and re-freezes at the destination. Carries the metadata's pinned
+  /// ruleset when one exists. Idempotency is handled by the caller's
+  /// balance checks (same as the plain SPL path).
+  async _releasePnft(mint, recipient, bs58) {
+    const {
+      createUmi,
+      mplTokenMetadata,
+      tmTransferV1,
+      TokenStandard,
+      fetchMetadata,
+      findMetadataPda,
+      keypairIdentity,
+      publicKey,
+      unwrapOption,
+    } = lazyTmUmi();
+    const umi = createUmi(this.connection.rpcEndpoint, {
+      commitment: this.commitment,
+    }).use(mplTokenMetadata());
+    umi.use(
+      keypairIdentity(umi.eddsa.createKeypairFromSecretKey(Uint8Array.from(this.escrow.secretKey)))
+    );
+    const mintPk = publicKey(mint.toBase58());
+    const md = await fetchMetadata(umi, findMetadataPda(umi, { mint: mintPk }));
+    const pc = unwrapOption(md.programmableConfig);
+    const ruleSet = pc ? unwrapOption(pc.ruleSet) : null;
+    const args = {
+      mint: mintPk,
+      authority: umi.identity,
+      tokenOwner: umi.identity.publicKey,
+      destinationOwner: publicKey(recipient.toBase58()),
+      tokenStandard:
+        unwrapOption(md.tokenStandard) === 5
+          ? TokenStandard.ProgrammableNonFungibleEdition
+          : TokenStandard.ProgrammableNonFungible,
+    };
+    if (ruleSet) args.authorizationRules = ruleSet;
+    const res = await tmTransferV1(umi, args).sendAndConfirm(umi, {
+      confirm: { commitment: this.commitment },
+    });
+    return {
+      sigHex: "0x" + Buffer.from(res.signature).toString("hex"),
+      alreadyReleased: false,
+    };
   }
 
   /// Metaplex Core release: escrow signs as the asset owner and pays fees.

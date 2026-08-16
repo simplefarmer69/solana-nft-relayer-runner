@@ -36,27 +36,29 @@ class MockSolana {
   }
 
   /// The user-side action: transfer the NFT to the escrow EOA with a memo
-  /// carrying the EVM recipient (and optional URI). Returns the deposit tx
-  /// signature (64 bytes, like a real Solana signature).
-  depositToEscrow(mintHex, fromHex, recipientEvm, uri = "") {
+  /// carrying the EVM recipient (and optional URI). `name` mirrors the
+  /// asset's own on-chain metadata name (what the real adapter decodes from
+  /// the Core asset / Token Metadata PDA). Returns the deposit tx signature
+  /// (64 bytes, like a real Solana signature).
+  depositToEscrow(mintHex, fromHex, recipientEvm, uri = "", name = "") {
     const m = norm(mintHex);
     if (this.owners.get(m) !== norm(fromHex)) throw new Error("mock: depositor does not own mint");
     this.owners.set(m, this.escrow);
     const sigHex = randHex(64);
-    this.depositLog.push({ sigHex, mintHex: m, recipientEvm, uri });
+    this.depositLog.push({ sigHex, mintHex: m, recipientEvm, uri, name });
     return sigHex;
   }
 
   /// Batch deposit: MANY NFTs move to the escrow in ONE Solana transaction
   /// (one signature) under one shared memo — exactly what a multi-select
   /// bridge UI produces. Returns the single shared tx signature.
-  depositManyToEscrow(mintHexes, fromHex, recipientEvm, uri = "") {
+  depositManyToEscrow(mintHexes, fromHex, recipientEvm, uri = "", name = "") {
     const sigHex = randHex(64);
     for (const mintHex of mintHexes) {
       const m = norm(mintHex);
       if (this.owners.get(m) !== norm(fromHex)) throw new Error("mock: depositor does not own mint");
       this.owners.set(m, this.escrow);
-      this.depositLog.push({ sigHex, mintHex: m, recipientEvm, uri });
+      this.depositLog.push({ sigHex, mintHex: m, recipientEvm, uri, name });
     }
     return sigHex;
   }
