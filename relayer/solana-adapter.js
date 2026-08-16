@@ -198,6 +198,7 @@ class SolanaRpcAdapter {
         const memo = this._parseMemo(tx);
         if (!memo) continue; // parked without memo — manual ops path, never guessed
         const { web3 } = this;
+        const md = await this._splMetadata(b.mint);
         deposits.push({
           sigHex: "0x" + Buffer.from(this.bs58.decode(s.signature)).toString("hex"),
           mintHex:
@@ -205,8 +206,11 @@ class SolanaRpcAdapter {
           recipientEvm: memo.recipientEvm,
           // Metadata preservation: memo URI wins; otherwise read the NFT's
           // own Token Metadata URI so the wrap always points at the real
-          // metadata even when the depositing UI passes none.
-          uri: memo.uri || (await this._splMetadataUri(b.mint)) || "",
+          // metadata even when the depositing UI passes none. The name rides
+          // along so the relayer's name-only fallback has something to show
+          // when no usable URI survives sanitization.
+          uri: memo.uri || md?.uri || "",
+          name: md?.name || "",
         });
       }
 
@@ -230,8 +234,10 @@ class SolanaRpcAdapter {
             Buffer.from(new this.web3.PublicKey(assetB58).toBytes()).toString("hex"),
           recipientEvm: memo.recipientEvm,
           // Metadata preservation: memo URI wins; otherwise the Core asset's
-          // own on-chain uri field rides into the wrap.
+          // own on-chain uri field rides into the wrap. Name rides along for
+          // the relayer's name-only fallback.
           uri: memo.uri || asset.uri || "",
+          name: asset.name || "",
         });
       }
     }
@@ -246,10 +252,10 @@ class SolanaRpcAdapter {
     return { deposits: deduped, cursor: newestSig };
   }
 
-  /// SPL NFT metadata URI from the Metaplex Token Metadata PDA. Best-effort:
-  /// returns null when no metadata account exists (bare SPL token) — the
-  /// deposit still mints, just with an empty URI.
-  async _splMetadataUri(mintB58) {
+  /// SPL NFT metadata ({uri, name}) from the Metaplex Token Metadata PDA.
+  /// Best-effort: returns null when no metadata account exists (bare SPL
+  /// token) — the deposit still mints, just with an empty URI.
+  async _splMetadata(mintB58) {
     try {
       const { web3 } = this;
       const programId = new web3.PublicKey(TOKEN_METADATA_PROGRAM_ID);
@@ -260,7 +266,8 @@ class SolanaRpcAdapter {
       const info = await this.connection.getAccountInfo(pda, this.commitment);
       if (!info) return null;
       const md = decodeTokenMetadata(info.data);
-      return md?.uri || null;
+      if (!md) return null;
+      return { uri: md.uri || null, name: md.name || null };
     } catch {
       return null; // metadata is best-effort; never block a deposit on it
     }

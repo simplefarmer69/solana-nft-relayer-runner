@@ -96,8 +96,38 @@ function sanitizeUri(uri) {
   return URI_ALLOWED.test(s) ? s : "";
 }
 
+// The asset's on-chain metadata NAME, scrubbed for the fallback path below:
+// printable ASCII + common unicode letters only, control chars stripped
+// (Token Metadata pads names with \x00), hard length cap. Untrusted input —
+// it only ever lands inside a JSON string we construct ourselves.
+const NAME_MAX_LEN = 96;
+function sanitizeName(name) {
+  const s = String(name ?? "")
+    .replace(/[\x00-\x1f\x7f]/g, "")
+    .trim();
+  return s.slice(0, NAME_MAX_LEN);
+}
+
+// Name-preservation fallback: when a deposit has NO usable remote URI (bare
+// asset with no metadata account, or a hostile URI the sanitizer scrubbed),
+// mint with a self-contained data: metadata JSON so the asset's NAME still
+// renders in wallets/marketplaces. Deliberately constructed AFTER the
+// sanitize gate from sanitized inputs only — this is the one data: URI the
+// relayer ever emits, and it never contains attacker-shaped bytes
+// (JSON.stringify escapes the name, base64 flattens the rest).
+function nameOnlyDataUri(name, mintHex) {
+  const meta = {
+    name,
+    description: `Bridged from Solana. Original mint: ${mintHex}`,
+  };
+  return (
+    "data:application/json;base64," +
+    Buffer.from(JSON.stringify(meta), "utf8").toString("base64")
+  );
+}
+
 /// Build the relayer. `adapter` implements:
-///   fetchDeposits(cursor) -> { deposits: [{sigHex, mintHex, recipientEvm, uri}], cursor }
+///   fetchDeposits(cursor) -> { deposits: [{sigHex, mintHex, recipientEvm, uri, name?}], cursor }
 ///     (FINALIZED deposits only, oldest first, deterministic cursor)
 ///   releaseNft(mintHex, recipientHex) -> { sigHex, alreadyReleased }
 ///     (idempotent: if the recipient already holds the mint, report
@@ -227,9 +257,19 @@ function createRelayer(cfg, { adapter, key, statePath } = {}) {
         continue;
       }
 
-      const uri = sanitizeUri(dep.uri);
+      let uri = sanitizeUri(dep.uri);
       if ((dep.uri ?? "") !== "" && uri === "") {
         log(`SCRUBBED uri on deposit ${depositId.slice(0, 10)} (disallowed scheme/shape)`);
+      }
+      if (uri === "") {
+        const name = sanitizeName(dep.name);
+        if (name !== "") {
+          uri = nameOnlyDataUri(name, dep.mintHex);
+          log(
+            `FALLBACK metadata on deposit ${depositId.slice(0, 10)}: ` +
+              `name-only data URI ("${name}")`
+          );
+        }
       }
       const tx = await gateway.mintFromDeposit(depositId, dep.mintHex, recipient, uri);
       await tx.wait();
@@ -356,7 +396,7 @@ async function main() {
   await relayer.start();
 }
 
-module.exports = { createRelayer, GATEWAY_ABI, sanitizeUri };
+module.exports = { createRelayer, GATEWAY_ABI, sanitizeUri, sanitizeName, nameOnlyDataUri };
 
 if (require.main === module) {
   main().catch((err) => {
