@@ -1,14 +1,18 @@
 name: relayer
 
 # Serverless operator for the Solana <-> Robinhood Chain NFT route.
-# Runs the relayer for ~4 minutes every 5 minutes — near-continuous coverage
-# with no hosted infrastructure. The relayer is stateless-safe: local state
-# is a cache-only optimization, and losing it just re-derives everything
-# from on-chain state (see relayer/index.js header).
+# Each run relays for ~4 minutes and then DISPATCHES THE NEXT RUN, so
+# coverage is continuous without hosted infrastructure (workflow_dispatch
+# is the documented exception that GITHUB_TOKEN-created events CAN
+# trigger). The cron is the backstop that restarts the chain if a run is
+# ever lost — GitHub's scheduler can lag it by many minutes, which is fine
+# for a backstop. The relayer is stateless-safe: local state is a
+# cache-only optimization, and losing it re-derives everything from
+# on-chain state (see relayer/index.js header).
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -17,6 +21,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   tick:
@@ -66,3 +71,13 @@ jobs:
           OPERATOR_KEY: ${{ secrets.OPERATOR_KEY }}
           SOLANA_ESCROW_KEY: ${{ secrets.SOLANA_ESCROW_KEY }}
         run: node relayer/index.js
+
+      # Self-perpetuating chain: queue the next window even if this one
+      # failed (a failed window should alert, not stop the bridge). The
+      # concurrency group serializes runs; the cron restarts the chain if
+      # this dispatch is ever lost.
+      - name: chain next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run relayer.yml -R "$GITHUB_REPOSITORY" || true

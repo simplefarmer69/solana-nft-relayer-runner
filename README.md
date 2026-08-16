@@ -6,11 +6,12 @@ Serverless operator for the **Solana ↔ Robinhood Chain NFT route**
 `0xea34410F818Caa64aE957068ea20de6dda603B3d`, Solana escrow
 `6PhrdEpWZ1V5kuhV5UrADjcwUuRapnDcXuDrPcaFPbKH`).
 
-There is **no hosted server**. A GitHub Actions cron
-(`.github/workflows/relayer.yml`) runs the relayer for ~4 minutes every
-5 minutes, giving near-continuous coverage for free. Typical end-to-end
-bridge wait is **1–5 minutes**; worst case (GitHub scheduler delay) is
-~10–15 minutes.
+There is **no hosted server**. A GitHub Actions workflow
+(`.github/workflows/relayer.yml`) runs the relayer in a self-perpetuating
+chain: each ~4-minute window dispatches the next one, giving continuous
+coverage for free, with a cron as the backstop that restarts the chain if a
+dispatch is ever lost. Typical end-to-end bridge wait is **1–5 minutes**;
+worst case (chain broken + GitHub cron scheduler lag) ~15 minutes.
 
 ## Why this is safe to run statelessly
 
