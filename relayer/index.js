@@ -79,6 +79,21 @@ function loadJson(p, fallback) {
   }
 }
 
+// tokenURI is attacker-controlled twice over (deposit memo AND the asset's
+// own on-chain metadata), and it lands verbatim in wallets/marketplaces via
+// tokenURI(). Sanitize at the ONE chokepoint every mint passes through:
+// only well-formed http(s)/ipfs/ar URIs of sane length survive; anything
+// else (javascript:, data:, control chars, megabyte bombs) mints with an
+// EMPTY uri instead — the asset still bridges, the payload does not.
+const URI_MAX_LEN = 512;
+const URI_ALLOWED = /^(https?|ipfs|ar):\/\/[\x21-\x7e]+$/;
+function sanitizeUri(uri) {
+  const s = String(uri ?? "").trim();
+  if (s === "") return "";
+  if (s.length > URI_MAX_LEN) return "";
+  return URI_ALLOWED.test(s) ? s : "";
+}
+
 /// Build the relayer. `adapter` implements:
 ///   fetchDeposits(cursor) -> { deposits: [{sigHex, mintHex, recipientEvm, uri}], cursor }
 ///     (FINALIZED deposits only, oldest first, deterministic cursor)
@@ -172,7 +187,11 @@ function createRelayer(cfg, { adapter, key, statePath } = {}) {
         continue;
       }
 
-      const tx = await gateway.mintFromDeposit(depositId, dep.mintHex, recipient, dep.uri ?? "");
+      const uri = sanitizeUri(dep.uri);
+      if ((dep.uri ?? "") !== "" && uri === "") {
+        log(`SCRUBBED uri on deposit ${depositId.slice(0, 10)} (disallowed scheme/shape)`);
+      }
+      const tx = await gateway.mintFromDeposit(depositId, dep.mintHex, recipient, uri);
       await tx.wait();
       log(`MINTED wrap for mint ${dep.mintHex.slice(0, 10)} -> ${recipient} (${tx.hash})`);
     }
@@ -294,7 +313,7 @@ async function main() {
   await relayer.start();
 }
 
-module.exports = { createRelayer, GATEWAY_ABI };
+module.exports = { createRelayer, GATEWAY_ABI, sanitizeUri };
 
 if (require.main === module) {
   main().catch((err) => {

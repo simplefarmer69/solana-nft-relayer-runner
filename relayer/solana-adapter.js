@@ -106,14 +106,25 @@ function decodeTokenMetadata(data) {
 const TOKEN_METADATA_PROGRAM_ID = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s";
 
 class SolanaRpcAdapter {
-  constructor({ rpcUrl, escrowSecretKey, commitment = "finalized" }) {
+  // escrowSecretKey (byte array) is only needed to SIGN releases. Read-only
+  // consumers (custody checks in the guarded ops tools) pass escrowPubkey
+  // (base58 string) instead so the cold escrow key never leaves its vault.
+  constructor({ rpcUrl, escrowSecretKey, escrowPubkey, commitment = "finalized" }) {
     const { web3, bs58 } = lazyDeps();
     if (!rpcUrl) throw new Error("rpcUrl required");
     this.web3 = web3;
     this.bs58 = bs58;
     this.commitment = commitment;
     this.connection = new web3.Connection(rpcUrl, commitment);
-    this.escrow = web3.Keypair.fromSecretKey(Uint8Array.from(escrowSecretKey));
+    if (escrowSecretKey) {
+      this.escrow = web3.Keypair.fromSecretKey(Uint8Array.from(escrowSecretKey));
+      this.readOnly = false;
+    } else if (escrowPubkey) {
+      this.escrow = { publicKey: new web3.PublicKey(escrowPubkey) };
+      this.readOnly = true;
+    } else {
+      throw new Error("escrowSecretKey (signing) or escrowPubkey (read-only) required");
+    }
   }
 
   escrowPubkeyHex() {
@@ -302,6 +313,7 @@ class SolanaRpcAdapter {
   /// Routes by asset shape: Metaplex Core accounts release via mpl-core
   /// transferV1; everything else takes the classic SPL ATA path.
   async releaseNft(mintHex, recipientHex) {
+    if (this.readOnly) throw new Error("adapter is read-only (no escrow secret key) — cannot release");
     const { web3, spl, bs58 } = { web3: this.web3, spl: lazyDeps().spl, bs58: this.bs58 };
     const mint = new web3.PublicKey(hexToBytes(mintHex));
     const recipient = new web3.PublicKey(hexToBytes(recipientHex));
