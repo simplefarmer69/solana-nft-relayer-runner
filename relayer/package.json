@@ -1,0 +1,22 @@
+{
+  "name": "solana-nft-relayer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Operator relayer for the Solana <-> Robinhood Chain NFT route (EOA escrow custody). Mock mode needs only ethers; rpc mode additionally needs the optional Solana deps.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "ethers": "^6.13.4"
+  },
+  "optionalDependencies": {
+    "@metaplex-foundation/mpl-core": "^1.1.1",
+    "@metaplex-foundation/umi": "^1.0.0",
+    "@metaplex-foundation/umi-bundle-defaults": "^1.0.0",
+    "@metaplex-foundation/umi-web3js-adapters": "^1.0.0",
+    "@solana/spl-token": "^0.4.9",
+    "@solana/web3.js": "^1.95.4",
+    "bs58": "^6.0.0"
+  }
+}

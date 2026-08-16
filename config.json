@@ -1,0 +1,13 @@
+{
+  "pollMs": 5000,
+  "evm": {
+    "rpc": "https://rpc.mainnet.chain.robinhood.com",
+    "chainId": 4663,
+    "gateway": "0x1aD80bEdEBf23476bb5897b8a55AF7CDaAC5E014"
+  },
+  "solana": {
+    "mode": "rpc",
+    "rpcUrl": "https://api.mainnet-beta.solana.com",
+    "genesisCursor": "2mLzEHpizdxK9xzas4LNzhXuJHgzAUXbGfNh29ZmZ2AvX8C7S31NXq3PjSkfCWwkA8pYA8REa54GcZJY9HXLS7Fn"
+  }
+}

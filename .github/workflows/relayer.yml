@@ -1,0 +1,68 @@
+name: relayer
+
+# Serverless operator for the Solana <-> Robinhood Chain NFT route.
+# Runs the relayer for ~4 minutes every 5 minutes — near-continuous coverage
+# with no hosted infrastructure. The relayer is stateless-safe: local state
+# is a cache-only optimization, and losing it just re-derives everything
+# from on-chain state (see relayer/index.js header).
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: relayer
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Best-effort state cache (Solana cursor + release nonce floor). A cache
+      # miss is SAFE — the relayer rescans from the pinned genesis cursor and
+      # re-walks the gateway's release ledger; the on-chain replay wall and
+      # the pre-mint escrow-custody check make the rescan a no-op.
+      - uses: actions/cache@v4
+        with:
+          path: relayer-state.json
+          key: relayer-state-${{ github.run_id }}
+          restore-keys: |
+            relayer-state-
+
+      - run: npm install --no-audit --no-fund
+        working-directory: relayer
+
+      # Optional keyed-RPC overrides live in secrets; the committed config
+      # carries the public endpoints as the fallback shape.
+      - name: compose runtime config
+        env:
+          RH_RPC_OVERRIDE: ${{ secrets.RH_RPC_URL }}
+          SOL_RPC_OVERRIDE: ${{ secrets.SOLANA_RPC_URL }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const cfg = JSON.parse(fs.readFileSync('config.json', 'utf8'));
+            if (process.env.RH_RPC_OVERRIDE) cfg.evm.rpc = process.env.RH_RPC_OVERRIDE;
+            if (process.env.SOL_RPC_OVERRIDE) cfg.solana.rpcUrl = process.env.SOL_RPC_OVERRIDE;
+            fs.writeFileSync('config.runtime.json', JSON.stringify(cfg, null, 2));
+          "
+
+      - name: run relayer window
+        env:
+          CONFIG_PATH: ${{ github.workspace }}/config.runtime.json
+          STATE_PATH: ${{ github.workspace }}/relayer-state.json
+          RELAYER_RUN_MS: "240000"
+          OPERATOR_KEY: ${{ secrets.OPERATOR_KEY }}
+          SOLANA_ESCROW_KEY: ${{ secrets.SOLANA_ESCROW_KEY }}
+        run: node relayer/index.js
