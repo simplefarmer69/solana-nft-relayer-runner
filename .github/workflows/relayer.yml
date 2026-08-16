@@ -43,9 +43,13 @@ jobs:
           path: |
             relayer-state.json
             relayer-state.legacy.json
-          key: relayer-state-${{ github.run_id }}
+          # v2: cache generation bumped 2026-08-16 to force a stateless rescan
+          # from the rewound genesisCursor (recovers two pre-cutover deposits
+          # that the original cursor fenced out). Safe by design: consumed
+          # deposits skip on the replay wall, unbacked ones park on custody.
+          key: relayer-state-v2-${{ github.run_id }}
           restore-keys: |
-            relayer-state-
+            relayer-state-v2-
 
       - run: npm install --no-audit --no-fund
         working-directory: relayer
