@@ -40,7 +40,9 @@ jobs:
       # the pre-mint escrow-custody check make the rescan a no-op.
       - uses: actions/cache@v4
         with:
-          path: relayer-state.json
+          path: |
+            relayer-state.json
+            relayer-state.legacy.json
           key: relayer-state-${{ github.run_id }}
           restore-keys: |
             relayer-state-
@@ -57,17 +59,36 @@ jobs:
         run: |
           node -e "
             const fs = require('fs');
-            const cfg = JSON.parse(fs.readFileSync('config.json', 'utf8'));
-            if (process.env.RH_RPC_OVERRIDE) cfg.evm.rpc = process.env.RH_RPC_OVERRIDE;
-            if (process.env.SOL_RPC_OVERRIDE) cfg.solana.rpcUrl = process.env.SOL_RPC_OVERRIDE;
-            fs.writeFileSync('config.runtime.json', JSON.stringify(cfg, null, 2));
+            for (const f of ['config.json', 'config.legacy.json']) {
+              const cfg = JSON.parse(fs.readFileSync(f, 'utf8'));
+              if (process.env.RH_RPC_OVERRIDE) cfg.evm.rpc = process.env.RH_RPC_OVERRIDE;
+              if (process.env.SOL_RPC_OVERRIDE) cfg.solana.rpcUrl = process.env.SOL_RPC_OVERRIDE;
+              fs.writeFileSync(f.replace('.json', '.runtime.json'), JSON.stringify(cfg, null, 2));
+            }
           "
 
-      - name: run relayer window
+      # Primary gateway (TheCardWall Slabs, deposit-gated): full duty —
+      # deposits mint here (allowlisted recipients while the gate is closed)
+      # and bridge-backs release from escrow.
+      - name: run relayer window (TheCardWall Slabs gateway)
         env:
           CONFIG_PATH: ${{ github.workspace }}/config.runtime.json
           STATE_PATH: ${{ github.workspace }}/relayer-state.json
-          RELAYER_RUN_MS: "240000"
+          RELAYER_RUN_MS: "180000"
+          OPERATOR_KEY: ${{ secrets.OPERATOR_KEY }}
+          SOLANA_ESCROW_KEY: ${{ secrets.SOLANA_ESCROW_KEY }}
+        run: node relayer/index.js
+
+      # RETIRED first-generation gateway (wCARD): releases ONLY. Its one
+      # existing wrap can always bridge back to Solana, but no new wrap can
+      # ever enter through it (releasesOnly skips the deposit scan and the
+      # on-chain mint valve is clamped to 1/day as defense-in-depth).
+      - name: run relayer window (retired wCARD gateway, releases only)
+        if: always()
+        env:
+          CONFIG_PATH: ${{ github.workspace }}/config.legacy.runtime.json
+          STATE_PATH: ${{ github.workspace }}/relayer-state.legacy.json
+          RELAYER_RUN_MS: "45000"
           OPERATOR_KEY: ${{ secrets.OPERATOR_KEY }}
           SOLANA_ESCROW_KEY: ${{ secrets.SOLANA_ESCROW_KEY }}
         run: node relayer/index.js

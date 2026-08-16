@@ -53,6 +53,8 @@ const { ethers } = require("ethers");
 
 const GATEWAY_ABI = [
   "function processedDeposits(bytes32) view returns (bool)",
+  "function depositsOpen() view returns (bool)",
+  "function depositRecipientAllowed(address) view returns (bool)",
   "function nextReleaseNonce() view returns (uint256)",
   "function releaseRequests(uint256) view returns (bytes32 solanaMint, bytes32 solanaRecipient, address requestedBy, uint40 requestedAt, uint8 status, bytes32 solanaTxSigHash)",
   "function mintFromDeposit(bytes32 depositId, bytes32 solanaMint, address recipient, string uri) returns (uint256)",
@@ -132,6 +134,33 @@ function createRelayer(cfg, { adapter, key, statePath } = {}) {
     return wrappedReader;
   }
 
+  // Deposit gate probe. Gated bytecode (2026-08-16+) exposes depositsOpen()
+  // + depositRecipientAllowed(); pre-gate bytecode reverts the probe and is
+  // treated as open (it has no gate to enforce). Cached per recipient per
+  // tick-batch is unnecessary — these are cheap view calls.
+  let gateSupported = null;
+  async function recipientAllowed(recipient) {
+    if (gateSupported === false) return true;
+    try {
+      const open = await reader.depositsOpen();
+      gateSupported = true;
+      if (open) return true;
+      return await reader.depositRecipientAllowed(recipient);
+    } catch (err) {
+      // Missing-function reverts decode as BAD_DATA/CALL_EXCEPTION in ethers
+      // v6 — that means pre-gate bytecode. Anything else (network, timeout)
+      // is transient and must THROW so the tick aborts and retries; a
+      // misclassification can never mint wrongly (the chain enforces the
+      // gate), it could only wedge one tick.
+      if (gateSupported === null && (err.code === "BAD_DATA" || err.code === "CALL_EXCEPTION")) {
+        gateSupported = false;
+        log("gateway bytecode has no deposit gate — treating deposits as open (legacy)");
+        return true;
+      }
+      throw err;
+    }
+  }
+
   async function processDeposits() {
     const { deposits, cursor } = await adapter.fetchDeposits(state.solanaCursor);
     for (const dep of deposits) {
@@ -172,6 +201,17 @@ function createRelayer(cfg, { adapter, key, statePath } = {}) {
         log(
           `PARKED deposit ${depositId.slice(0, 10)}: mint ${dep.mintHex.slice(0, 10)} ` +
             `already wrapped — manual ops return required`
+        );
+        continue;
+      }
+      // DEPOSIT GATE: while the gateway's gate is closed, only allowlisted
+      // recipients mint. A gated-out deposit is a PERMANENT failure for the
+      // relayer (the chain would revert RecipientNotAllowed forever), so it
+      // parks — NFT safe in escrow for the guarded manual-return tool.
+      if (!(await recipientAllowed(recipient))) {
+        log(
+          `PARKED deposit ${depositId.slice(0, 10)}: recipient ${recipient} ` +
+            `not allowlisted while the deposit gate is closed`
         );
         continue;
       }
@@ -235,7 +275,10 @@ function createRelayer(cfg, { adapter, key, statePath } = {}) {
   }
 
   async function tick() {
-    await processDeposits();
+    // releasesOnly: serve bridge-backs but never mint — the mode a RETIRED
+    // gateway runs in so its existing wraps can always exit while no new
+    // wrap can ever enter through it.
+    if (!cfg.releasesOnly) await processDeposits();
     await processReleases();
     persist();
   }

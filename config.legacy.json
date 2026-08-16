@@ -1,9 +1,10 @@
 {
   "pollMs": 5000,
+  "releasesOnly": true,
   "evm": {
     "rpc": "https://rpc.mainnet.chain.robinhood.com",
     "chainId": 4663,
-    "gateway": "0x261518C7a2364dc73e0724e8CA28c7370a6bcafe"
+    "gateway": "0x1aD80bEdEBf23476bb5897b8a55AF7CDaAC5E014"
   },
   "solana": {
     "mode": "rpc",

@@ -1,10 +1,19 @@
 # Solana NFT relayer runner
 
-Serverless operator for the **Solana ↔ Robinhood Chain NFT route**
-(gateway `0x1aD80bEdEBf23476bb5897b8a55AF7CDaAC5E014`, wrapped collection
-"Card Wall : Solana Vault" / `wCARD`
-`0xea34410F818Caa64aE957068ea20de6dda603B3d`, Solana escrow
-`6PhrdEpWZ1V5kuhV5UrADjcwUuRapnDcXuDrPcaFPbKH`).
+Serverless operator for the **Solana ↔ Robinhood Chain NFT route**.
+
+Primary gateway (2026-08-16, deposit-gated):
+`0x261518C7a2364dc73e0724e8CA28c7370a6bcafe`, wrapped collection
+**"TheCardWall Slabs" / `SLAB`**
+`0x8565507566C6a79B57E4eaA70b8232a64003d352`, Solana escrow
+`6PhrdEpWZ1V5kuhV5UrADjcwUuRapnDcXuDrPcaFPbKH`. The gateway's deposit gate
+is CLOSED: fresh wraps mint only to owner-allowlisted recipients (relayer
+parks anything else); **bridge-back is open to every holder, always**.
+
+Retired first-generation gateway (releases only):
+`0x1aD80bEdEBf23476bb5897b8a55AF7CDaAC5E014` ("Card Wall : Solana Vault" /
+`wCARD`). The workflow serves its bridge-backs with `releasesOnly` so the
+one existing wrap can always exit; it never mints there again.
 
 There is **no hosted server**. A GitHub Actions workflow
 (`.github/workflows/relayer.yml`) runs the relayer in a self-perpetuating
