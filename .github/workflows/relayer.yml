@@ -43,13 +43,19 @@ jobs:
           path: |
             relayer-state.json
             relayer-state.legacy.json
-          # v2: cache generation bumped 2026-08-16 to force a stateless rescan
-          # from the rewound genesisCursor (recovers two pre-cutover deposits
-          # that the original cursor fenced out). Safe by design: consumed
-          # deposits skip on the replay wall, unbacked ones park on custody.
-          key: relayer-state-v2-${{ github.run_id }}
+          # v3: cache generation bumped 2026-09-14 to rescan from a
+          # genesisCursor rewound to 11:03 UTC that day — 52 Card Wall deposits
+          # (13 batch txs, 12:34-12:55 UTC) were PARKED because their memo
+          # recipient 0x9C00...882d was not yet allowlisted; the gateway owner
+          # allowlisted it at 16:56 UTC (tx 0xd3dd3b67...6edea3) but the
+          # cursor had already advanced past them. Parking advances the
+          # cursor by design, so an allowlist change ALWAYS needs a rewind.
+          # (v2, 2026-08-16: recovered two pre-cutover deposits.) Safe by
+          # design: consumed deposits skip on the replay wall, unbacked ones
+          # park on custody.
+          key: relayer-state-v3-${{ github.run_id }}
           restore-keys: |
-            relayer-state-v2-
+            relayer-state-v3-
 
       - run: npm install --no-audit --no-fund
         working-directory: relayer

@@ -8,6 +8,6 @@
   "solana": {
     "mode": "rpc",
     "rpcUrl": "https://api.mainnet-beta.solana.com",
-    "genesisCursor": "33JR6gnu8J8XEqEa6iAZypzZvJB55gv3Pe3HXQbqCWsM1m5NCEN9crrUax8EhTwt1RATF2V4d18BfmFG59AMV7uo"
+    "genesisCursor": "3cyGJq2aQd2VsKps9TQetvfNdAuFmaqmJHND4ipEYWijbkLdi6ZsYjhUBuBPdzze7Z26ZyxuGs6Za367Hm4MWYzY"
   }
 }
