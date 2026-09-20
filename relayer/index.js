@@ -37,7 +37,15 @@
 // SAFETY ORDER OF OPERATIONS: the Solana cursor only advances after every
 // deposit in the batch was either minted or confirmed already-processed; a
 // failed mint aborts the tick and the batch retries. Same for the release
-// nonce floor.
+// nonce floor. The cursor also never lands on a signature younger than the
+// adapter's settle lag (default 10 min, SOLANA_CURSOR_LAG_SECS): RPC address
+// indexes converge asynchronously, and a cursor pinned to the newest visible
+// signature can fence off deposits that surface a few seconds later
+// (2026-09-20: 23 of a 24-slab batch skipped that way). Fresh deposits are
+// re-scanned every tick until they settle; the replay wall makes that free.
+//
+// watchdog.js is the cursor-independent backlog check that turns a silent
+// stall of either lane into a failed scheduled run.
 //
 // Config: CONFIG_PATH (json) + OPERATOR_KEY env (the gateway operator EOA).
 // Solana custody key: SOLANA_ESCROW_KEY env (JSON byte array) in rpc mode.
@@ -195,6 +203,17 @@ function createRelayer(cfg, { adapter, key, statePath } = {}) {
     }
   }
 
+  // Deposits inside the adapter's cursor settle lag are re-scanned every
+  // tick until the signature index has converged (see solana-adapter.js
+  // header). Their skip/park outcomes are deterministic, so announce each
+  // once per process instead of once per tick.
+  const announced = new Set();
+  function announceOnce(depositId, line) {
+    if (announced.has(depositId)) return;
+    announced.add(depositId);
+    log(line);
+  }
+
   async function processDeposits() {
     const { deposits, cursor } = await adapter.fetchDeposits(state.solanaCursor);
     for (const dep of deposits) {
@@ -202,8 +221,9 @@ function createRelayer(cfg, { adapter, key, statePath } = {}) {
       // memo (batch bridging), so the replay wall keys on (tx sig, asset) —
       // keccak(sig) alone would let only the first asset of a batch mint.
       const depositId = ethers.keccak256(ethers.concat([dep.sigHex, dep.mintHex]));
+      if (announced.has(depositId)) continue; // settled this process: minted/parked/skipped
       if (await reader.processedDeposits(depositId)) {
-        log(`deposit ${depositId.slice(0, 10)} already processed, skipping`);
+        announceOnce(depositId, `deposit ${depositId.slice(0, 10)} already processed, skipping`);
         continue;
       }
 
@@ -228,11 +248,12 @@ function createRelayer(cfg, { adapter, key, statePath } = {}) {
         /* parked below */
       }
       if (!recipient || recipient === ethers.ZeroAddress) {
-        log(`PARKED deposit ${depositId.slice(0, 10)}: invalid recipient "${dep.recipientEvm}"`);
+        announceOnce(depositId, `PARKED deposit ${depositId.slice(0, 10)}: invalid recipient "${dep.recipientEvm}"`);
         continue;
       }
       if (await (await getWrappedReader()).isWrapped(dep.mintHex)) {
-        log(
+        announceOnce(
+          depositId,
           `PARKED deposit ${depositId.slice(0, 10)}: mint ${dep.mintHex.slice(0, 10)} ` +
             `already wrapped — manual ops return required`
         );
@@ -243,7 +264,8 @@ function createRelayer(cfg, { adapter, key, statePath } = {}) {
       // relayer (the chain would revert RecipientNotAllowed forever), so it
       // parks — NFT safe in escrow for the guarded manual-return tool.
       if (!(await recipientAllowed(recipient))) {
-        log(
+        announceOnce(
+          depositId,
           `PARKED deposit ${depositId.slice(0, 10)}: recipient ${recipient} ` +
             `not allowlisted while the deposit gate is closed`
         );
@@ -254,7 +276,27 @@ function createRelayer(cfg, { adapter, key, statePath } = {}) {
       // against stale deposit records for assets released since (the asset
       // is provably elsewhere, so this can never park a servable deposit).
       if (adapter.isInEscrow && !(await adapter.isInEscrow(dep.mintHex))) {
-        log(
+        // A custody miss on a FRESH deposit is provider lag, not a stale
+        // record: the 2026-09-20 tick that ran 5s after a batch read two
+        // just-created escrow token accounts as empty and parked both. Inside
+        // the settle window the deposit is re-scanned next tick anyway, so
+        // leave it unannounced and let the read converge; only a deposit old
+        // enough to be outside the window is a genuine stale record.
+        const ageSecs =
+          typeof dep.blockTime === "number" ? Math.floor(Date.now() / 1000) - dep.blockTime : null;
+        const lag = Number(adapter.cursorLagSecs || 0);
+        if (ageSecs !== null && lag > 0 && ageSecs < lag) {
+          if (!announced.has(`fresh:${depositId}`)) {
+            announced.add(`fresh:${depositId}`);
+            log(
+              `custody of ${dep.mintHex.slice(0, 10)} not visible yet for fresh deposit ` +
+                `${depositId.slice(0, 10)} (${ageSecs}s old) — retrying next tick`
+            );
+          }
+          continue;
+        }
+        announceOnce(
+          depositId,
           `PARKED deposit ${depositId.slice(0, 10)}: asset ${dep.mintHex.slice(0, 10)} ` +
             `not in escrow — stale record, never minting unbacked`
         );
@@ -277,6 +319,7 @@ function createRelayer(cfg, { adapter, key, statePath } = {}) {
       }
       const tx = await gateway.mintFromDeposit(depositId, dep.mintHex, recipient, uri);
       await tx.wait();
+      announced.add(depositId);
       log(`MINTED wrap for mint ${dep.mintHex.slice(0, 10)} -> ${recipient} (${tx.hash})`);
     }
     state.solanaCursor = cursor;

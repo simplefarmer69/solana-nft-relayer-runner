@@ -43,8 +43,18 @@ jobs:
           path: |
             relayer-state.json
             relayer-state.legacy.json
-          # v3: cache generation bumped 2026-09-14 to rescan from a
-          # genesisCursor rewound to 11:03 UTC that day — 52 Card Wall deposits
+          # v4: cache generation bumped 2026-09-20 to rescan from a
+          # genesisCursor rewound to 12:28 UTC that day. The tick that ran 5s
+          # after a 10-tx / 24-slab Card Wall batch (15:15:25-29 UTC) saw only
+          # the three newest txs in the RPC's address index, minted one, parked
+          # two on a not-yet-visible custody read, and pinned the cursor to
+          # the newest — the seven Core txs surfaced in the index seconds
+          # later but were already behind the cursor (same race on a 2-asset
+          # batch at 12:41 UTC). 25 servable deposits sat 8h behind a green
+          # runner. Code fix in relayer/: the cursor now lags 10 min behind
+          # head and a fresh custody miss retries instead of parking;
+          # watchdog.yml turns any repeat into a failed run within minutes.
+          # (v3, 2026-09-14: rescan from 11:03 UTC that day — 52 Card Wall deposits
           # (13 batch txs, 12:34-12:55 UTC) were PARKED because their memo
           # recipient 0x9C00...882d was not yet allowlisted; the gateway owner
           # allowlisted it at 16:56 UTC (tx 0xd3dd3b67...6edea3) but the
@@ -52,10 +62,10 @@ jobs:
           # cursor by design, so an allowlist change ALWAYS needs a rewind.
           # (v2, 2026-08-16: recovered two pre-cutover deposits.) Safe by
           # design: consumed deposits skip on the replay wall, unbacked ones
-          # park on custody.
-          key: relayer-state-v3-${{ github.run_id }}
+          # park on custody.)
+          key: relayer-state-v4-${{ github.run_id }}
           restore-keys: |
-            relayer-state-v3-
+            relayer-state-v4-
 
       - run: npm install --no-audit --no-fund
         working-directory: relayer

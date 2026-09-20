@@ -38,6 +38,20 @@
 // so a relayer crash between the Solana send and the on-chain markReleased
 // can never double-deliver.
 //
+// CURSOR SETTLE LAG (2026-09-20 incident): getSignaturesForAddress is served
+// from an address index that RPC nodes populate ASYNCHRONOUSLY from block
+// finality, and load-balanced providers answer from different nodes. A tick
+// that ran seconds after a 10-tx deposit batch saw ONE of the ten in the
+// index, minted it, and moved the cursor to it; the other nine surfaced in
+// the index moments later but were already "older than the cursor" and
+// were never scanned again (23 slabs sat at escrow for 8h with every tick
+// green). The cursor therefore never advances onto a signature younger
+// than `cursorLagSecs` (default 10 min) — fresh signatures are still
+// scanned and their deposits minted every tick, they just stay inside the
+// re-scan window until the index has had time to converge. Re-scanning is
+// free of side effects (gateway replay wall + custody check), and a parsed
+// tx cache keeps the repeated window scan cheap.
+//
 // Requires (rpc mode only): @solana/web3.js, @solana/spl-token, bs58, and for
 // Core assets @metaplex-foundation/{umi,umi-bundle-defaults,mpl-core}.
 
@@ -154,13 +168,25 @@ class SolanaRpcAdapter {
   // escrowSecretKey (byte array) is only needed to SIGN releases. Read-only
   // consumers (custody checks in the guarded ops tools) pass escrowPubkey
   // (base58 string) instead so the cold escrow key never leaves its vault.
-  constructor({ rpcUrl, escrowSecretKey, escrowPubkey, commitment = "finalized" }) {
+  constructor({
+    rpcUrl,
+    escrowSecretKey,
+    escrowPubkey,
+    commitment = "finalized",
+    cursorLagSecs = Number(process.env.SOLANA_CURSOR_LAG_SECS || 600),
+  }) {
     const { web3, bs58 } = lazyDeps();
     if (!rpcUrl) throw new Error("rpcUrl required");
     this.web3 = web3;
     this.bs58 = bs58;
     this.commitment = commitment;
+    this.cursorLagSecs = Math.max(0, Number(cursorLagSecs) || 0);
     this.connection = new web3.Connection(rpcUrl, commitment);
+    // Finalized transactions are immutable — cache parsed txs so the cursor
+    // lag window (re-scanned every tick) costs one fetch per signature, not
+    // one per tick. Bounded; oldest entries evicted first.
+    this._txCache = new Map();
+    this._txCacheMax = 5000;
     if (escrowSecretKey) {
       this.escrow = web3.Keypair.fromSecretKey(Uint8Array.from(escrowSecretKey));
       this.readOnly = false;
@@ -225,21 +251,48 @@ class SolanaRpcAdapter {
     throw new Error("escrow signature history >50k since cursor — refusing to skip; investigate");
   }
 
-  /// FINALIZED deposits into the escrow EOA, oldest first. Cursor is the
-  /// newest processed signature (base58); only finalized history is scanned,
-  /// so the cursor can never skip a deposit that later becomes visible.
+  async _parsedTx(signature) {
+    const hit = this._txCache.get(signature);
+    if (hit) return hit;
+    const tx = await this.connection.getParsedTransaction(signature, {
+      maxSupportedTransactionVersion: 0,
+      commitment: this.commitment,
+    });
+    if (tx && tx.meta) {
+      if (this._txCache.size >= this._txCacheMax) {
+        this._txCache.delete(this._txCache.keys().next().value);
+      }
+      this._txCache.set(signature, tx);
+    }
+    return tx;
+  }
+
+  /// The cursor candidate for a newest-first signature list: the newest
+  /// signature that is at least `cursorLagSecs` old (see header). Signatures
+  /// without a blockTime never become the cursor (conservative). Returns
+  /// `fallback` when nothing in the list has settled yet.
+  _settledCursor(sigs, fallback) {
+    if (this.cursorLagSecs === 0) return sigs[0]?.signature ?? fallback;
+    const cutoff = Math.floor(Date.now() / 1000) - this.cursorLagSecs;
+    for (const s of sigs) {
+      if (typeof s.blockTime === "number" && s.blockTime <= cutoff) return s.signature;
+    }
+    return fallback;
+  }
+
+  /// FINALIZED deposits into the escrow EOA, oldest first, with the deposit
+  /// tx blockTime. Cursor is the newest SETTLED signature (base58, see the
+  /// cursor lag note in the header); only finalized history is scanned.
   async fetchDeposits(cursor) {
     const sigs = await this._newSignatures(cursor);
     if (sigs.length === 0) return { deposits: [], cursor: cursor ?? null };
-    const newestSig = sigs[0].signature;
+    const nextCursor = this._settledCursor(sigs, cursor ?? null);
     const deposits = [];
     for (const s of sigs.reverse()) {
       if (s.err) continue;
-      const tx = await this.connection.getParsedTransaction(s.signature, {
-        maxSupportedTransactionVersion: 0,
-        commitment: this.commitment,
-      });
+      const tx = await this._parsedTx(s.signature);
       if (!tx || !tx.meta) throw new Error(`tx ${s.signature} not fetchable — retry tick`);
+      const blockTime = typeof s.blockTime === "number" ? s.blockTime : tx.blockTime ?? null;
       const escrowB58 = this.escrow.publicKey.toBase58();
       // The deposited mint is whichever mint the escrow went 0 -> 1 on.
       const post = (tx.meta.postTokenBalances ?? []).filter(
@@ -268,6 +321,7 @@ class SolanaRpcAdapter {
           // when no usable URI survives sanitization.
           uri: memo.uri || md?.uri || "",
           name: md?.name || "",
+          blockTime,
         });
       }
 
@@ -295,6 +349,7 @@ class SolanaRpcAdapter {
           // the relayer's name-only fallback.
           uri: memo.uri || asset.uri || "",
           name: asset.name || "",
+          blockTime,
         });
       }
     }
@@ -306,7 +361,37 @@ class SolanaRpcAdapter {
       seen.add(k);
       return true;
     });
-    return { deposits: deduped, cursor: newestSig };
+    return { deposits: deduped, cursor: nextCursor };
+  }
+
+  /// Every deposit whose tx landed within the last `windowSecs`, regardless
+  /// of any cursor — the watchdog's view. Pages newest-first until the
+  /// signatures predate the window.
+  async fetchDepositsSince(windowSecs) {
+    const cutoff = Math.floor(Date.now() / 1000) - windowSecs;
+    const sigs = [];
+    let before;
+    for (let page = 0; page < 50; page++) {
+      const batch = await this.connection.getSignaturesForAddress(
+        this.escrow.publicKey,
+        { limit: 1000, ...(before ? { before } : {}) },
+        this.commitment
+      );
+      if (batch.length === 0) break;
+      sigs.push(...batch);
+      const oldest = batch[batch.length - 1];
+      if (batch.length < 1000 || (typeof oldest.blockTime === "number" && oldest.blockTime < cutoff)) {
+        break;
+      }
+      before = oldest.signature;
+    }
+    const inWindow = sigs.filter((s) => typeof s.blockTime !== "number" || s.blockTime >= cutoff);
+    if (inWindow.length === 0) return [];
+    // Reuse the cursor scan on exactly this slice: `until` = the newest
+    // signature just outside the window.
+    const boundary = sigs.find((s) => typeof s.blockTime === "number" && s.blockTime < cutoff);
+    const { deposits } = await this.fetchDeposits(boundary ? boundary.signature : undefined);
+    return deposits;
   }
 
   /// SPL NFT metadata ({uri, name}) from the Metaplex Token Metadata PDA.

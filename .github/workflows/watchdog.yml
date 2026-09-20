@@ -1,0 +1,119 @@
+name: watchdog
+
+# Cursor-independent heartbeat for the Solana <-> Robinhood Chain NFT route.
+# The relayer chain (relayer.yml) only reports what it can see, so a stall
+# caused by a skipped deposit, an unreached release, or a dry escrow shows
+# up as a GREEN run doing nothing (2026-09-20: 25 servable Card Wall
+# deposits sat at escrow for 8h behind green runs). This job re-derives the
+# backlog from CHAIN STATE every 15 minutes and FAILS when:
+#
+#   * a servable deposit (backed, unwrapped, valid + allowlisted recipient)
+#     has been unminted for > 20 min            -> mint worker stalled
+#   * a bridge-back has sat in Requested > 20 min -> release worker stalled
+#   * the escrow SOL float is under the warn line -> releases about to fail
+#   * the gateway is paused
+#   * the relayer chain itself is dead (no relayer.yml run in 20 min, or the
+#     last three runs all failed)
+#
+# A failed run emails the repo owner (GitHub default) and, when the optional
+# ALERT_WEBHOOK_URL secret is set, POSTs the same summary there. Read-only:
+# this job holds no signing keys and never touches relayer state.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: watchdog
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm install --no-audit --no-fund
+        working-directory: relayer
+
+      - name: compose runtime config
+        env:
+          RH_RPC_OVERRIDE: ${{ secrets.RH_RPC_URL }}
+          SOL_RPC_OVERRIDE: ${{ secrets.SOLANA_RPC_URL }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            for (const f of ['config.json', 'config.legacy.json']) {
+              const cfg = JSON.parse(fs.readFileSync(f, 'utf8'));
+              if (process.env.RH_RPC_OVERRIDE) cfg.evm.rpc = process.env.RH_RPC_OVERRIDE;
+              if (process.env.SOL_RPC_OVERRIDE) cfg.solana.rpcUrl = process.env.SOL_RPC_OVERRIDE;
+              fs.writeFileSync(f.replace('.json', '.runtime.json'), JSON.stringify(cfg, null, 2));
+            }
+          "
+
+      - name: backlog check (TheCardWall Slabs gateway)
+        id: primary
+        continue-on-error: true
+        env:
+          CONFIG_PATH: ${{ github.workspace }}/config.runtime.json
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+        run: node relayer/watchdog.js
+
+      - name: backlog check (retired wCARD gateway, releases only)
+        id: legacy
+        continue-on-error: true
+        env:
+          CONFIG_PATH: ${{ github.workspace }}/config.legacy.runtime.json
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+        run: node relayer/watchdog.js
+
+      # The relayer chain is self-dispatching; if it broke and the cron has
+      # not restarted it, no run is younger than ~20 minutes. Three failed
+      # runs in a row means every window is dying (bad key, dead RPC egress).
+      - name: relayer chain liveness
+        id: chain
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          runs=$(gh run list -R "$GITHUB_REPOSITORY" --workflow relayer.yml -L 3 \
+            --json createdAt,conclusion,status,databaseId)
+          node -e "
+            const runs = JSON.parse(process.argv[1]);
+            const newest = runs[0];
+            const ageMin = newest ? (Date.now() - Date.parse(newest.createdAt)) / 60000 : Infinity;
+            const done = runs.filter(r => r.status === 'completed');
+            const allFailed = done.length >= 3 && done.every(r => r.conclusion === 'failure');
+            const lines = [];
+            if (ageMin > 20) lines.push('RELAYER CHAIN DEAD: newest relayer.yml run is ' + ageMin.toFixed(0) + ' min old (cron backstop has not restarted it)');
+            if (allFailed) lines.push('RELAYER CHAIN FAILING: last three relayer.yml runs all failed - see ' + runs.map(r => r.databaseId).join(', '));
+            console.log('newest relayer run ' + (newest ? newest.databaseId + ' ' + ageMin.toFixed(1) + ' min ago (' + (newest.conclusion || newest.status) + ')' : 'none'));
+            if (lines.length) {
+              for (const l of lines) console.log('ALERT: ' + l);
+              const url = process.env.ALERT_WEBHOOK_URL;
+              if (url) {
+                const text = lines.join('\n');
+                fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, content: text }) })
+                  .then(r => console.log('alert webhook -> HTTP ' + r.status), e => console.log('alert webhook failed: ' + e.message))
+                  .finally(() => process.exit(1));
+              } else process.exit(1);
+            }
+          " "$runs"
+
+      - name: verdict
+        if: steps.primary.outcome != 'success' || steps.legacy.outcome != 'success' || steps.chain.outcome != 'success'
+        run: |
+          echo "route stalled: primary=${{ steps.primary.outcome }} legacy=${{ steps.legacy.outcome }} chain=${{ steps.chain.outcome }}"
+          exit 1
