@@ -68,6 +68,10 @@ const GATEWAY_ABI = [
 const WRAPPED_ABI = ["function isWrapped(bytes32) view returns (bool)"];
 
 const STATUS_REQUESTED = 1;
+// Escrow SOL float: a pNFT release needs ~0.0011 SOL (recipient token-account
+// rent + fee) on top of the escrow's own rent-exempt minimum (~0.0009 SOL).
+const ESCROW_SOL_HARD_FLOOR_LAMPORTS = Number(process.env.ESCROW_SOL_HARD_FLOOR_LAMPORTS || 3_000_000); // 0.003 SOL
+const ESCROW_SOL_WARN_LAMPORTS = Number(process.env.ESCROW_SOL_WARN_LAMPORTS || 30_000_000); // 0.03 SOL
 
 function log(...args) {
   console.log(new Date().toISOString(), "[sol-nft-relayer]", ...args);
@@ -287,11 +291,33 @@ function createRelayer(cfg, { adapter, key, statePath } = {}) {
     // the whole range retries next tick.
     const next = await reader.nextReleaseNonce();
     let floor = BigInt(state.nonceFloor || 1);
+    let solChecked = false;
     for (let nonce = floor; nonce < next; nonce++) {
       const req = await reader.releaseRequests(nonce);
       if (Number(req.status) !== STATUS_REQUESTED) {
         floor = nonce + 1n; // terminal — skip forever
         continue;
+      }
+      // SOL float preflight, once per tick and only when something needs
+      // serving: a release pays ~0.0011 SOL of token-account rent out of the
+      // escrow, and a dry escrow otherwise fails as an opaque simulation
+      // error. Below the hard floor we fail loud with the fix in the message;
+      // below the warn line we log early so the float gets topped up first.
+      if (!solChecked && adapter.escrowLamports) {
+        solChecked = true;
+        const lamports = Number(await adapter.escrowLamports());
+        const sol = (lamports / 1e9).toFixed(4);
+        const escrow = adapter.escrowAddress ? adapter.escrowAddress() : "escrow";
+        if (lamports < ESCROW_SOL_HARD_FLOOR_LAMPORTS) {
+          throw new Error(
+            `ESCROW-SOL-EMPTY: escrow ${escrow} holds ${sol} SOL, under the ` +
+              `${ESCROW_SOL_HARD_FLOOR_LAMPORTS / 1e9} SOL release floor - ` +
+              `top it up (ops-bot solbridge job refills via Relay) before releases can be served`
+          );
+        }
+        if (lamports < ESCROW_SOL_WARN_LAMPORTS) {
+          log(`ESCROW-SOL-LOW: escrow ${escrow} holds ${sol} SOL - top up before it runs dry`);
+        }
       }
       // Deliver on Solana FIRST, then close the books on-chain. The adapter
       // is idempotent, so a crash between the two steps cannot double-send.

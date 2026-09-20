@@ -176,6 +176,18 @@ class SolanaRpcAdapter {
     return "0x" + Buffer.from(this.escrow.publicKey.toBytes()).toString("hex");
   }
 
+  /// Escrow SOL balance in lamports. Every release creates the recipient's
+  /// token account out of this balance, so the relayer preflights it before
+  /// serving bridge-backs (2026-09-20: a dry escrow surfaced only as an
+  /// opaque "Transaction simulation failed" on every tick).
+  async escrowLamports() {
+    return this.connection.getBalance(this.escrow.publicKey, this.commitment);
+  }
+
+  escrowAddress() {
+    return this.escrow.publicKey.toBase58();
+  }
+
   _parseMemo(tx) {
     const all = [
       ...tx.transaction.message.instructions,
