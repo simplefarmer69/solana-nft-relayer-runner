@@ -54,6 +54,47 @@ full re-scan, zero side effects).
 If every tick in a run window fails, the job exits nonzero and GitHub
 notifies the repo owner — a silently blind relayer never shows green.
 
+| `ALERT_WEBHOOK_URL` | no | Optional. The watchdog POSTs a JSON `{text, content}` summary here on every detected stall (Slack / Discord / any webhook bridge). Without it, the failed run's GitHub email is the alert. |
+
+## Watchdog (heartbeat for stalls the relayer cannot see)
+
+A relayer tick that finds nothing to do is "ok", so a stall caused by a
+deposit the cursor skipped, a release the ledger walk never reached, or a
+dry escrow looks exactly like a quiet route (2026-09-20: 25 servable Card
+Wall deposits sat at escrow for 8 hours behind green runs).
+`.github/workflows/watchdog.yml` runs `relayer/watchdog.js` every 15
+minutes — read-only, keyless, and **independent of the relayer's cursor
+and cache** — and FAILS the run when:
+
+- a servable deposit (asset in escrow, unwrapped, valid and allowlisted
+  recipient) has been unminted for more than 20 minutes (mint worker stalled);
+- a bridge-back has sat in `Requested` for more than 20 minutes (release
+  worker stalled);
+- the escrow SOL float is under 0.03 SOL (releases are about to fail);
+- the gateway is paused;
+- the relayer chain itself is dead (no `relayer.yml` run in 20 minutes, or
+  the last three all failed).
+
+Deposits that are parked for a permanent reason (bad memo, non-allowlisted
+recipient, already wrapped, asset already released) are listed as
+informational and do not fail the run. Knobs: `WATCHDOG_WINDOW_SECS`
+(trailing window scanned, default 24h), `WATCHDOG_GRACE_SECS` (default
+1200), `WATCHDOG_ESCROW_SOL_WARN` (default 0.03).
+
+## Cursor settle lag (why the relayer re-scans the last 10 minutes)
+
+`getSignaturesForAddress` is served from an address index that RPC nodes
+populate asynchronously from finality, and load-balanced providers answer
+from different nodes. Pinning the cursor to the newest visible signature
+can therefore fence off deposits that surface in the index a few seconds
+later (the 2026-09-20 stall: a tick 5s after a 10-tx batch saw three txs,
+minted one, and never scanned the other seven again). The relayer now
+never advances the cursor onto a signature younger than
+`SOLANA_CURSOR_LAG_SECS` (default 600); fresh signatures are re-scanned
+every tick until they settle, which the gateway replay wall makes
+side-effect free. A custody read that misses on a deposit inside that
+window is treated as provider lag and retried, not parked.
+
 ## Self-hosting instead
 
 Anyone the gateway owner appoints can run this exact code anywhere
