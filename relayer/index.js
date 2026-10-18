@@ -387,9 +387,17 @@ function createRelayer(cfg, { adapter, key, statePath } = {}) {
     // releasesOnly: serve bridge-backs but never mint — the mode a RETIRED
     // gateway runs in so its existing wraps can always exit while no new
     // wrap can ever enter through it.
-    if (!cfg.releasesOnly) await processDeposits();
-    await processReleases();
-    persist();
+  let depositErr = null;
+  if (!cfg.releasesOnly) {
+    try {
+      await processDeposits();
+    } catch (e) {
+      depositErr = e;
+    }
+  }
+  await processReleases();
+  persist();
+  if (depositErr) throw depositErr;
   }
 
   let running = false;

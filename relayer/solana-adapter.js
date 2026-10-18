@@ -254,10 +254,21 @@ class SolanaRpcAdapter {
   async _parsedTx(signature) {
     const hit = this._txCache.get(signature);
     if (hit) return hit;
-    const tx = await this.connection.getParsedTransaction(signature, {
-      maxSupportedTransactionVersion: 0,
-      commitment: this.commitment,
-    });
+    let tx;
+    try {
+      tx = await this.connection.getParsedTransaction(signature, {
+        maxSupportedTransactionVersion: 0,
+        commitment: this.commitment,
+      });
+    } catch (e) {
+      if (!/Transaction version/i.test(String(e?.message ?? e))) throw e;
+      // web3.js 1.x rejects transaction versions above 0 in its response
+      // schema, so newer versions are fetched raw. Callers only read
+      // meta, blockTime and stringified program ids / accounts, which the
+      // jsonParsed wire shape carries as plain strings.
+      const m = /Transaction version \((\d+)\)/i.exec(String(e?.message ?? e));
+      tx = await this._rawParsedTx(signature, m ? Number(m[1]) : 1);
+    }
     if (tx && tx.meta) {
       if (this._txCache.size >= this._txCacheMax) {
         this._txCache.delete(this._txCache.keys().next().value);
@@ -265,6 +276,30 @@ class SolanaRpcAdapter {
       this._txCache.set(signature, tx);
     }
     return tx;
+  }
+
+  async _rawParsedTx(signature, version = 1) {
+    const res = await fetch(this.connection.rpcEndpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "getTransaction",
+        params: [
+          signature,
+          {
+            encoding: "jsonParsed",
+            maxSupportedTransactionVersion: version,
+            commitment: this.commitment,
+          },
+        ],
+      }),
+    });
+    if (!res.ok) throw new Error(`getTransaction ${signature}: http ${res.status}`);
+    const body = await res.json();
+    if (body.error) throw new Error(`getTransaction ${signature}: ${body.error.message}`);
+    return body.result ?? null;
   }
 
   /// The cursor candidate for a newest-first signature list: the newest
