@@ -58,6 +58,7 @@
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
+const { pickEvmRpc, pickSolanaRpc } = require("./rpc-select");
 
 const GATEWAY_ABI = [
   "function processedDeposits(bytes32) view returns (bool)",
@@ -423,6 +424,7 @@ async function main() {
   if (!cfg || !cfg.evm) throw new Error(`config with evm{} required at ${configPath}`);
   const key = process.env.OPERATOR_KEY;
   if (!key) throw new Error("OPERATOR_KEY required");
+  cfg.evm.rpc = await pickEvmRpc(cfg.evm.rpc, log);
 
   let adapter;
   if ((cfg.solana && cfg.solana.mode) === "mock") {
@@ -434,6 +436,7 @@ async function main() {
     const { SolanaRpcAdapter } = require("./solana-adapter");
     const escrowKey = process.env.SOLANA_ESCROW_KEY;
     if (!escrowKey) throw new Error("SOLANA_ESCROW_KEY required in rpc mode");
+    cfg.solana.rpcUrl = await pickSolanaRpc(cfg.solana.rpcUrl, log);
     adapter = new SolanaRpcAdapter({
       rpcUrl: cfg.solana.rpcUrl,
       escrowSecretKey: JSON.parse(escrowKey),

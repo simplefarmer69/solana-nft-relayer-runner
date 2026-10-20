@@ -32,6 +32,7 @@ const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
 const { GATEWAY_ABI } = require("./index");
+const { pickEvmRpc, pickSolanaRpc } = require("./rpc-select");
 
 const STATUS_REQUESTED = 1;
 
@@ -66,6 +67,8 @@ async function main() {
   const solWarn = Number(process.env.WATCHDOG_ESCROW_SOL_WARN || 0.03);
   const now = Math.floor(Date.now() / 1000);
 
+  cfg.evm.rpc = await pickEvmRpc(cfg.evm.rpc, log);
+  cfg.solana.rpcUrl = await pickSolanaRpc(cfg.solana.rpcUrl, log);
   const provider = new ethers.JsonRpcProvider(cfg.evm.rpc, cfg.evm.chainId, {
     staticNetwork: true,
     cacheTimeout: -1,
