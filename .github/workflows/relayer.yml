@@ -81,8 +81,8 @@ jobs:
             const fs = require('fs');
             for (const f of ['config.json', 'config.legacy.json']) {
               const cfg = JSON.parse(fs.readFileSync(f, 'utf8'));
-              if (process.env.RH_RPC_OVERRIDE) cfg.evm.rpc = [process.env.RH_RPC_OVERRIDE, cfg.evm.rpc].join(",");
-              if (process.env.SOL_RPC_OVERRIDE) cfg.solana.rpcUrl = [process.env.SOL_RPC_OVERRIDE, cfg.solana.rpcUrl].join(",");
+              if (process.env.RH_RPC_OVERRIDE) cfg.evm.rpc = [process.env.RH_RPC_OVERRIDE, cfg.evm.rpc].join(',');
+              if (process.env.SOL_RPC_OVERRIDE) cfg.solana.rpcUrl = [process.env.SOL_RPC_OVERRIDE, cfg.solana.rpcUrl].join(',');
               fs.writeFileSync(f.replace('.json', '.runtime.json'), JSON.stringify(cfg, null, 2));
             }
           "
